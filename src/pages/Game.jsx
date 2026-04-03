@@ -99,6 +99,8 @@ export default function Game({ gameId, user, onLeave }) {
   const [playedWords, setPlayedWords] = useState([]);
   const [readyCountdown, setReadyCountdown] = useState(null);
   const [playerProfiles, setPlayerProfiles] = useState({});
+  const [isDiceShuffling, setIsDiceShuffling] = useState(false);
+  const diceResetKeyRef = useRef(0);
   const previousPositionRef = useRef(0);
   const channelRef = useRef(null);
   const shuffleRef = useRef(null);
@@ -274,6 +276,8 @@ export default function Game({ gameId, user, onLeave }) {
     longShuffleRef.current = false;
     const TICKS = isLong ? 22 : 8;
     const INTERVAL = isLong ? 80 : 60;
+    diceResetKeyRef.current += 1;
+    setIsDiceShuffling(true);
     setActiveLetters(finalLetters.map(rand));
     shuffleRef.current = setInterval(() => {
       ticks++;
@@ -281,11 +285,15 @@ export default function Game({ gameId, user, onLeave }) {
         clearInterval(shuffleRef.current);
         shuffleRef.current = null;
         setActiveLetters(finalLetters);
+        setIsDiceShuffling(false);
       } else {
         setActiveLetters(finalLetters.map(() => rand()));
       }
     }, INTERVAL);
-    return () => { if (shuffleRef.current) clearInterval(shuffleRef.current); };
+    return () => {
+      if (shuffleRef.current) { clearInterval(shuffleRef.current); shuffleRef.current = null; }
+      setIsDiceShuffling(false);
+    };
   }, [JSON.stringify(game?.dice)]);
 
   useEffect(() => {
@@ -390,13 +398,13 @@ export default function Game({ gameId, user, onLeave }) {
   const challengeActive = game.challenge?.active === true;
   const challengeChallenger = game.challenge?.challenger;
   const challengeOpponent = challengeActive && challengeChallenger !== me;
-  const challengeInputDisabled = !roundOpen || !!winner || (challengeActive && challengeChallenger === me);
+  const challengeInputDisabled = !roundOpen || !!winner || (challengeActive && challengeChallenger === me) || isDiceShuffling;
   const isViewerFirstPlayer = game.players[0] === me;
   const baseActiveRowIndex = clamp(3 - game.position, 0, 6);
   const activeRowIndex = isViewerFirstPlayer ? baseActiveRowIndex : 6 - baseActiveRowIndex;
-  const scoreRows = Array.from({ length: targetScore }, (_, index) => targetScore - index);
-  const mySliderIndex = Math.max(0, Math.min(targetScore - myScore - 1, targetScore - 1));
-  const opponentSliderIndex = Math.max(0, Math.min(targetScore - opponentScore - 1, targetScore - 1));
+  const scoreRows = Array.from({ length: targetScore + 1 }, (_, index) => targetScore - index);
+  const mySliderIndex = Math.max(0, Math.min(targetScore - myScore, targetScore));
+  const opponentSliderIndex = Math.max(0, Math.min(targetScore - opponentScore, targetScore));
 
   const formatPlayer = (id) => {
     if (playerProfiles[id]) return playerProfiles[id];
@@ -661,9 +669,13 @@ export default function Game({ gameId, user, onLeave }) {
     // Remove ourselves from presence immediately
     const presentNow = (game.presentPlayers || []).filter(id => id !== me);
 
+    // Check winner by scores rather than local phase to avoid race where
+    // game.phase hasn't caught up yet and we'd overwrite "finished" with "paused".
+    const hasWinner = game.players?.some(id => (game.scores?.[id] ?? 0) >= (game.targetScore || 5));
+
     if (isAlone) {
       await supabase.from("games").delete().eq("id", gameId);
-    } else if (game.phase !== "finished") {
+    } else if (game.phase !== "finished" && !hasWinner) {
       await updateGame({
         phase: "paused",
         readyPlayers: [],
@@ -799,7 +811,7 @@ export default function Game({ gameId, user, onLeave }) {
         ) : null}
 
         <div className="controls-panel bottom-controls">
-          <WordInput onSubmit={submitWord} disabled={challengeInputDisabled} />
+          <WordInput onSubmit={submitWord} disabled={challengeInputDisabled} resetKey={diceResetKeyRef.current} />
         </div>
       </div>
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function WordInput({ onSubmit, disabled }) {
+export default function WordInput({ onSubmit, disabled, resetKey }) {
   const [word, setWord] = useState("");
   const inputRef = useRef(null);
   const prevDisabledRef = useRef(disabled);
@@ -11,6 +11,11 @@ export default function WordInput({ onSubmit, disabled }) {
     }
     prevDisabledRef.current = disabled;
   }, [disabled]);
+
+  // Clear the input whenever the dice change (new letters = stale word)
+  useEffect(() => {
+    setWord("");
+  }, [resetKey]);
 
   const submit = () => {
     if (disabled || !word.trim()) return;

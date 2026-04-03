@@ -86,6 +86,7 @@ export default function App() {
   };
 
   const isAdmin = ADMIN_EMAIL && user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  console.log(isAdmin);
 
   return (
     <div className="app-shell">
