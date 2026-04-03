@@ -7,6 +7,7 @@ import hourglassStart from "../assets/10s_challenge_hourglass_start.png";
 
 const MIN_LENGTH = 4;
 const MAX_CARRIAGE = 4;
+const CHALLENGE_DURATION_MS = 10000;
 
 const COLUMN_DICE_SETS = [
   ["H", "L", "L", "R", "W", "N"],
@@ -106,6 +107,7 @@ export default function Game({ gameId, user, onLeave }) {
   const isFirstCarriage = useRef(true);
   const longShuffleRef = useRef(false);
   const prevScoresSumRef = useRef(0);
+  const challengeLocalStartRef = useRef(null);
 
   useEffect(() => {
     let channel;
@@ -238,14 +240,21 @@ export default function Game({ gameId, user, onLeave }) {
   useEffect(() => {
     if (!game?.challenge?.active) {
       setCountdown(0);
+      challengeLocalStartRef.current = null;
       return;
     }
-    const expiresAt = game.challenge.expiresAt;
+    // Record when *this client* first sees the challenge go active so the
+    // countdown is driven by local wall-clock time, not the challenger's
+    // absolute timestamp (which can differ between devices by many seconds).
+    if (!challengeLocalStartRef.current) {
+      challengeLocalStartRef.current = Date.now();
+    }
+    const localStart = challengeLocalStartRef.current;
     const interval = setInterval(() => {
-      setCountdown(Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)));
+      setCountdown(Math.max(0, Math.ceil((CHALLENGE_DURATION_MS - (Date.now() - localStart)) / 1000)));
     }, 250);
     return () => clearInterval(interval);
-  }, [game?.challenge?.active, game?.challenge?.expiresAt]);
+  }, [game?.challenge?.active]);
 
   // Detect score increases so the dice shuffle can run longer on both clients.
   useEffect(() => {
@@ -629,7 +638,7 @@ export default function Game({ gameId, user, onLeave }) {
       challenge: {
         active: true,
         challenger: me,
-        expiresAt: Date.now() + 10000
+        expiresAt: Date.now() + CHALLENGE_DURATION_MS
       },
       status: `${formatPlayer(me)} started a challenge: 10s`
     });
