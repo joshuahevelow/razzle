@@ -3,11 +3,12 @@ import { supabase } from "../supabaseClient";
 
 const DEFAULT_TARGET_SCORE = 5;
 
-export default function Lobby({ setGameId, user }) {
+export default function Lobby({ setGameId, user, profile }) {
   const [games, setGames] = useState([]);
-  const [targetScore, setTargetScore] = useState(DEFAULT_TARGET_SCORE);
+  const [targetScore, setTargetScore] = useState(String(DEFAULT_TARGET_SCORE));
   const [opponentEmail, setOpponentEmail] = useState("");
   const [error, setError] = useState("");
+  const [profileMap, setProfileMap] = useState({});
 
   const me = user?.id;
   const myEmail = user?.email?.toLowerCase() || "";
@@ -34,7 +35,13 @@ export default function Lobby({ setGameId, user }) {
             return [...current, payload.new];
           }
           if (payload.eventType === "UPDATE") return current.map((g) => g.id === payload.new.id ? payload.new : g);
-          if (payload.eventType === "DELETE") return current.filter((g) => g.id !== payload.old.id);
+          if (payload.eventType === "DELETE") {
+            const deletedId = payload.old?.id;
+            if (deletedId) return current.filter((g) => g.id !== deletedId);
+            // REPLICA IDENTITY not set — re-fetch to sync
+            supabase.from("games").select("*").then(({ data }) => { if (data) setGames(data); });
+            return current;
+          }
           return current;
         });
       })
@@ -63,21 +70,46 @@ export default function Lobby({ setGameId, user }) {
     };
   }, [me, myEmail]);
 
-  const opponentEmail_ = (game) => {
-    if (game.players?.[0] === me) return game.inviteEmail || "Opponent";
-    return game.senderEmail || "Opponent";
+  useEffect(() => {
+    const ids = [...new Set(games.flatMap(g => g.players || []))];
+    if (ids.length === 0) return;
+    supabase.from("profiles").select("id, username").in("id", ids).then(({ data }) => {
+      if (!data) return;
+      setProfileMap(Object.fromEntries(data.map(p => [p.id, p.username])));
+    });
+  }, [JSON.stringify(games.map(g => (g.players || []).join()))]);
+
+  const opponentDisplay = (game) => {
+    if (game.players?.[0] === me) {
+      const oppId = game.players?.[1];
+      return (oppId && profileMap[oppId]) || game.inviteEmail || "Opponent";
+    }
+    return profileMap[game.players?.[0]] || game.senderEmail || "Opponent";
+  };
+
+  const formatDate = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const date = `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`;
+    const hours = d.getHours();
+    const minutes = String(d.getMinutes()).padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+    const h = hours % 12 || 12;
+    return `${date}, ${h}:${minutes} ${ampm}`;
   };
 
   const createGame = async () => {
     const inviteEmail = opponentEmail.trim().toLowerCase();
     if (!inviteEmail || !inviteEmail.includes("@")) { setError("Enter a valid opponent email."); return; }
     if (inviteEmail === myEmail) { setError("You cannot invite yourself."); return; }
+    const parsedTarget = parseInt(targetScore, 10);
+    if (!parsedTarget || parsedTarget < 3 || parsedTarget > 10) { setError("Points to win must be between 3 and 10."); return; }
     setError("");
 
     const { data, error } = await supabase.from("games").insert({
       players: [me],
       scores: { [me]: 0 },
-      targetScore,
+      targetScore: parsedTarget,
       position: 0,
       dice: [],
       phase: "invited",
@@ -96,8 +128,8 @@ export default function Lobby({ setGameId, user }) {
 
   const cancelInvite = async (game) => {
     setGames((prev) => prev.filter((g) => g.id !== game.id));
-    lobbyChannelRef.current?.send({ type: "broadcast", event: "lobby-delete", payload: { gameId: game.id } });
     await supabase.from("games").delete().eq("id", game.id);
+    lobbyChannelRef.current?.send({ type: "broadcast", event: "lobby-delete", payload: { gameId: game.id } });
   };
 
   const acceptInvite = async (game) => {
@@ -106,7 +138,7 @@ export default function Lobby({ setGameId, user }) {
       players: [...game.players, me],
       scores: { ...game.scores, [me]: 0 },
       phase: "ready",
-      status: "Opponent joined. Start the first round when you are both ready."
+      status: "Game accepted. Both players need to ready up to begin."
     }).eq("id", game.id).select().single();
     if (data) {
       lobbyChannelRef.current?.send({ type: "broadcast", event: "lobby-update", payload: { game: data } });
@@ -155,7 +187,7 @@ export default function Lobby({ setGameId, user }) {
             min="3"
             max="10"
             value={targetScore}
-            onChange={(e) => setTargetScore(Number(e.target.value))}
+            onChange={(e) => setTargetScore(e.target.value)}
           />
         </div>
 
@@ -173,6 +205,7 @@ export default function Lobby({ setGameId, user }) {
                 <div className="game-card-info">
                   <span><strong>To:</strong> {game.inviteEmail}</span>
                   <span><strong>Target score:</strong> {game.targetScore || DEFAULT_TARGET_SCORE}</span>
+                  {game.created_at && <span className="game-card-date">{formatDate(game.created_at)}</span>}
                 </div>
                 <button className="button secondary" onClick={() => cancelInvite(game)}>
                   Cancel
@@ -192,8 +225,9 @@ export default function Lobby({ setGameId, user }) {
           incomingRequests.map((game) => (
             <div key={game.id} className="game-card">
               <div className="game-card-info">
-                <span><strong>From:</strong> {opponentEmail_(game)}</span>
+                <span><strong>From:</strong> {opponentDisplay(game)}</span>
                 <span><strong>Target score:</strong> {game.targetScore || DEFAULT_TARGET_SCORE}</span>
+                {game.created_at && <span className="game-card-date">{formatDate(game.created_at)}</span>}
               </div>
               <button className="button primary" onClick={() => acceptInvite(game)}>
                 Accept
@@ -216,9 +250,10 @@ export default function Lobby({ setGameId, user }) {
             return (
               <div key={game.id} className="game-card">
                 <div className="game-card-info">
-                  <span><strong>Opponent:</strong> {opponentEmail_(game)}</span>
+                  <span><strong>Opponent:</strong> {opponentDisplay(game)}</span>
                   <span><strong>Target score:</strong> {game.targetScore || DEFAULT_TARGET_SCORE}</span>
                   <span><strong>Score: </strong>{myScore} – {oppScore}</span>
+                  {game.created_at && <span className="game-card-date">{formatDate(game.created_at)}</span>}
                 </div>
                 <button className="button secondary" onClick={() => setGameId(game.id)}>
                   Resume

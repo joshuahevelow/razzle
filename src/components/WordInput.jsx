@@ -13,7 +13,7 @@ export default function WordInput({ onSubmit, disabled }) {
     <div className="word-form">
       <input
         className="word-input"
-        placeholder="Type a word from the letters"
+        placeholder="Enter word"
         value={word}
         onChange={e => setWord(e.target.value)}
         onKeyDown={e => {

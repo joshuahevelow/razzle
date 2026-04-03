@@ -6,7 +6,7 @@ import hourglass from "../assets/10s_challenge_hourglass.gif";
 import hourglassStart from "../assets/10s_challenge_hourglass_start.png";
 
 const MIN_LENGTH = 4;
-const MAX_CARRIAGE = 3;
+const MAX_CARRIAGE = 4;
 
 const COLUMN_DICE_SETS = [
   ["H", "L", "L", "R", "W", "N"],
@@ -26,10 +26,23 @@ function shuffleArray(array) {
   return result;
 }
 
-function rollDice() {
-  const columns = shuffleArray([...Array(6).keys()]);
+function rollAllDice() {
+  const assignments = shuffleArray([...Array(6).keys()]);
   return {
-    dice: columns.map(dieIndex => {
+    diceAssignments: assignments,
+    dice: assignments.map(dieIndex => {
+      const die = COLUMN_DICE_SETS[dieIndex];
+      return die[Math.floor(Math.random() * die.length)];
+    })
+  };
+}
+
+function rollFaces(assignments) {
+  const cols = (assignments && assignments.length === 6)
+    ? assignments
+    : shuffleArray([...Array(6).keys()]);
+  return {
+    dice: cols.map(dieIndex => {
       const die = COLUMN_DICE_SETS[dieIndex];
       return die[Math.floor(Math.random() * die.length)];
     })
@@ -70,6 +83,11 @@ function isDictionaryWord(word) {
   return WORDS.has(normalizeWord(word).toUpperCase());
 }
 
+function renderStatus(line) {
+  const parts = line.split(/\*\*(.*?)\*\*/g);
+  return parts.map((part, i) => i % 2 === 1 ? <strong key={i}>{part}</strong> : part);
+}
+
 export default function Game({ gameId, user, onLeave }) {
   const [game, setGame] = useState(null);
   const [roundMessage, setRoundMessage] = useState("");
@@ -77,8 +95,17 @@ export default function Game({ gameId, user, onLeave }) {
   const [activeLetters, setActiveLetters] = useState(Array(6).fill(""));
   const [challengeGifPlaying, setChallengeGifPlaying] = useState(false);
   const [challengeGifKey, setChallengeGifKey] = useState(0);
+  const [playedWords, setPlayedWords] = useState([]);
+  const [readyCountdown, setReadyCountdown] = useState(null);
+  const [playerProfiles, setPlayerProfiles] = useState({});
   const previousPositionRef = useRef(0);
   const channelRef = useRef(null);
+  const shuffleRef = useRef(null);
+  const gridRef = useRef(null);
+  const carriageRef = useRef(null);
+  const isFirstCarriage = useRef(true);
+  const longShuffleRef = useRef(false);
+  const prevScoresSumRef = useRef(0);
 
   useEffect(() => {
     let channel;
@@ -90,6 +117,7 @@ export default function Game({ gameId, user, onLeave }) {
         return;
       }
       setGame(data);
+      setPlayedWords(data.playedWords || []);
     };
 
     loadGame();
@@ -107,11 +135,19 @@ export default function Game({ gameId, user, onLeave }) {
         (payload) => {
           if (payload.new) {
             setGame(payload.new);
+            setPlayedWords(payload.new.playedWords || []);
           }
         }
       )
       .on("broadcast", { event: "game-update" }, ({ payload }) => {
         if (payload?.game) setGame(payload.game);
+      })
+      .on("broadcast", { event: "word-played" }, ({ payload }) => {
+        if (!payload?.word) return;
+        setPlayedWords(prev => {
+          if (prev.some(w => w.id === payload.id)) return prev;
+          return [...prev, payload];
+        });
       })
       .subscribe();
 
@@ -123,11 +159,82 @@ export default function Game({ gameId, user, onLeave }) {
     };
   }, [gameId]);
 
+  // Track presence: add ourselves to presentPlayers on mount, remove on unmount
   useEffect(() => {
-    if (!game?.challenge?.active) {
-      setCountdown(0);
-      return;
+    if (!user?.id || !gameId) return;
+    const userId = user.id;
+
+    const join = async () => {
+      // Fetch the full row so we can broadcast the complete updated game to others
+      const { data } = await supabase.from("games").select("*").eq("id", gameId).single();
+      if (!data) return;
+      const current = data.presentPlayers || [];
+      if (current.includes(userId)) return;
+      const newPresent = [...current, userId];
+      const { data: updated } = await supabase
+        .from("games")
+        .update({ presentPlayers: newPresent })
+        .eq("id", gameId)
+        .select()
+        .single();
+      if (updated) {
+        // Update our own local state and broadcast to the other player immediately
+        setGame(updated);
+        channelRef.current?.send({
+          type: "broadcast",
+          event: "game-update",
+          payload: { game: updated }
+        });
+      }
+    };
+
+    const leave = async () => {
+      const { data } = await supabase.from("games").select("presentPlayers").eq("id", gameId).single();
+      const current = data?.presentPlayers || [];
+      await supabase.from("games").update({ presentPlayers: current.filter(id => id !== userId) }).eq("id", gameId);
+    };
+
+    join();
+    return () => { leave(); };
+  }, [gameId, user?.id]);
+
+  useEffect(() => {
+    if (!game?.readyPlayers || !game?.players) return;
+    const bothReady = game.players.length >= 2 && game.players.every(id => (game.readyPlayers || []).includes(id));
+    if (bothReady && game.phase !== "playing") {
+      setReadyCountdown(3);
     }
+  }, [JSON.stringify(game?.readyPlayers)]);
+
+  useEffect(() => {
+    if (game?.phase === "paused" || game?.phase === "ready") {
+      setReadyCountdown(null);
+    }
+  }, [game?.phase]);
+
+  useEffect(() => {
+    if (readyCountdown === null) return;
+    if (readyCountdown > 0) {
+      const t = setTimeout(() => setReadyCountdown(c => c - 1), 1000);
+      return () => clearTimeout(t);
+    }
+    // countdown reached 0 — only players[0] fires the actual game start
+    if (game?.players?.[0] !== me) return;
+    const newDice = rollAllDice();
+    updateGame({
+      readyPlayers: game.readyPlayers,
+      phase: "playing",
+      position: 0,
+      dice: newDice.dice,
+      diceAssignments: newDice.diceAssignments,
+      roundOpen: true,
+      challenge: null,
+      status: "Round started. Search the six letters for a word of four letters or more."
+    });
+    setReadyCountdown(null);
+  }, [readyCountdown]);
+
+  useEffect(() => {
 
     const interval = setInterval(() => {
       const left = Math.max(0, Math.ceil((game.challenge.expiresAt - Date.now()) / 1000));
@@ -137,10 +244,65 @@ export default function Game({ gameId, user, onLeave }) {
     return () => clearInterval(interval);
   }, [game?.challenge?.active, game?.challenge?.expiresAt]);
 
+  // Detect score increases so the dice shuffle can run longer on both clients.
+  useEffect(() => {
+    const sum = Object.values(game?.scores || {}).reduce((a, b) => a + b, 0);
+    if (sum > prevScoresSumRef.current) longShuffleRef.current = true;
+    prevScoresSumRef.current = sum;
+  }, [JSON.stringify(game?.scores)]);
+
   useEffect(() => {
     if (!game?.dice?.length) return;
-    setActiveLetters(game.dice.map(letter => letter.toUpperCase()));
-  }, [game?.dice]);
+    const finalLetters = game.dice.map(l => l.toUpperCase());
+    if (shuffleRef.current) { clearInterval(shuffleRef.current); shuffleRef.current = null; }
+    const ALL = 'ABCDEFGHIJKLMNOPRSTW'.split('');
+    const rand = () => ALL[Math.floor(Math.random() * ALL.length)];
+    let ticks = 0;
+    const isLong = longShuffleRef.current;
+    longShuffleRef.current = false;
+    const TICKS = isLong ? 22 : 8;
+    const INTERVAL = isLong ? 80 : 60;
+    setActiveLetters(finalLetters.map(rand));
+    shuffleRef.current = setInterval(() => {
+      ticks++;
+      if (ticks >= TICKS) {
+        clearInterval(shuffleRef.current);
+        shuffleRef.current = null;
+        setActiveLetters(finalLetters);
+      } else {
+        setActiveLetters(finalLetters.map(() => rand()));
+      }
+    }, INTERVAL);
+    return () => { if (shuffleRef.current) clearInterval(shuffleRef.current); };
+  }, [JSON.stringify(game?.dice)]);
+
+  useEffect(() => {
+    if (!game?.players || !gridRef.current || !carriageRef.current) return;
+    const isFirstPlayer = game.players[0] === user.id;
+    const base = Math.min(Math.max(3 - (game.position || 0), 0), 6);
+    const rowIndex = isFirstPlayer ? base : 6 - base;
+    const rows = gridRef.current.querySelectorAll(':scope > .grid-row');
+    const row = rows[rowIndex];
+    if (!row) return;
+    if (isFirstCarriage.current) {
+      carriageRef.current.style.transition = 'none';
+      carriageRef.current.style.top = row.offsetTop + 'px';
+      carriageRef.current.style.height = row.offsetHeight + 'px';
+      carriageRef.current.getBoundingClientRect(); // force reflow
+      carriageRef.current.style.transition = '';
+      isFirstCarriage.current = false;
+    } else {
+      carriageRef.current.style.top = row.offsetTop + 'px';
+      carriageRef.current.style.height = row.offsetHeight + 'px';
+    }
+  }, [game?.position, game?.players]);
+
+  useEffect(() => {
+    if (!game?.players?.length) return;
+    supabase.from("profiles").select("id, username").in("id", game.players).then(({ data }) => {
+      if (data) setPlayerProfiles(Object.fromEntries(data.map(p => [p.id, p.username])));
+    });
+  }, [JSON.stringify(game?.players)]);
 
   useEffect(() => {
     if (!game?.challenge?.active) {
@@ -169,15 +331,16 @@ export default function Game({ gameId, user, onLeave }) {
       const position = clamp(game.position + pushDirection(game, game.challenge.challenger), -MAX_CARRIAGE, MAX_CARRIAGE);
       const challengerIsLeft = game.players[0] === game.challenge.challenger;
       const scored = position === (challengerIsLeft ? MAX_CARRIAGE : -MAX_CARRIAGE);
-      const newDice = rollDice();
+      const newDice = scored ? rollAllDice() : rollFaces(game.diceAssignments);
       const update = {
         position: scored ? 0 : position,
         dice: newDice.dice,
+        diceAssignments: newDice.diceAssignments ?? game.diceAssignments,
         roundOpen: true,
         challenge: null,
         status: scored
-          ? "Challenge time expired. Challenger scores the push and the carriage returns to the center."
-          : "Challenge time expired. The challenger pushes a row ahead."
+          ? `Challenge successful: ${formatPlayer(game.challenge.challenger)} advances.\n${formatPlayer(game.challenge.challenger)} scores a point!`
+          : `Challenge successful: ${formatPlayer(game.challenge.challenger)} advances.`
       };
 
       if (scored) {
@@ -185,6 +348,7 @@ export default function Game({ gameId, user, onLeave }) {
           ...game.scores,
           [game.challenge.challenger]: (game.scores[game.challenge.challenger] || 0) + 1
         };
+        if ((game.scores[game.challenge.challenger] || 0) + 1 >= (game.targetScore || 5)) update.phase = "finished";
       }
 
       await updateGame(update);
@@ -222,7 +386,12 @@ export default function Game({ gameId, user, onLeave }) {
   const mySliderIndex = Math.max(0, Math.min(targetScore - myScore - 1, targetScore - 1));
   const opponentSliderIndex = Math.max(0, Math.min(targetScore - opponentScore - 1, targetScore - 1));
 
-  const formatPlayer = (id) => id === me ? "You" : "Opponent";
+  const formatPlayer = (id) => {
+    if (playerProfiles[id]) return playerProfiles[id];
+    if (id === game.players[0]) return game.senderEmail || "Player 1";
+    if (id === game.players[1]) return game.inviteEmail || "Player 2";
+    return "Player";
+  };
   const formatPosition = (pos) => {
     if (pos === 0) return "Center";
     return pos > 0 ? "Toward opponent" : "Toward you";
@@ -234,20 +403,34 @@ export default function Game({ gameId, user, onLeave }) {
     setGame(optimisticGame);
 
     // Broadcast directly over WebSocket to all other clients (<50ms vs postgres_changes which can be 500ms+)
+    // Always include ourselves in presentPlayers of the broadcast so the recipient knows we're here,
+    // unless we're explicitly passing presentPlayers in the update (e.g. leaveGame removes us).
+    const broadcastGame = update.presentPlayers !== undefined
+      ? optimisticGame
+      : { ...optimisticGame, presentPlayers: [...new Set([...(optimisticGame?.presentPlayers || []), me])] };
     channelRef.current?.send({
       type: "broadcast",
       event: "game-update",
-      payload: { game: optimisticGame }
+      payload: { game: broadcastGame }
     });
 
-    const { data, error } = await supabase.from("games").update(update).eq("id", gameId).select().single();
+    // diceAssignments is maintained in local/broadcast state but not yet in the DB schema.
+    // Strip it from the Supabase write to avoid a column-not-found error that would silently
+    // prevent scores and phase updates from being persisted.
+    const { diceAssignments: _da, ...dbUpdate } = update;
+    const { data, error } = await supabase.from("games").update(dbUpdate).eq("id", gameId).select().single();
     if (error) {
       console.error("Failed to update game:", error);
       setRoundMessage(`Could not update the game: ${error.message}`);
       return null;
     }
     if (data) {
-      setGame(data);
+      // Apply only the fields we sent to the DB, so a partial update (e.g. challenge-only)
+      // doesn't overwrite fields like dice/position that a concurrent word-submission
+      // update has already set locally but hasn't committed to the DB yet.
+      setGame(prev => prev
+        ? { ...prev, ...Object.fromEntries(Object.keys(dbUpdate).map(k => [k, data[k]])) }
+        : data);
       return data;
     }
     // .select() returned null (e.g. RLS filtered the row) — refetch to sync canonical state
@@ -256,16 +439,23 @@ export default function Game({ gameId, user, onLeave }) {
     return refetched ?? null;
   };
 
-  const startGame = async () => {
-    const newDice = rollDice();
-    await updateGame({
-      phase: "playing",
-      position: 0,
-      dice: newDice.dice,
-      roundOpen: true,
-      challenge: null,
-      status: "Round started. Search the six letters for a word of four letters or more."
-    });
+  const readyUp = async () => {
+    const alreadyReady = (game.readyPlayers || []);
+    if (alreadyReady.includes(me)) return;
+    const newReadyPlayers = [...alreadyReady, me];
+    const bothReady = newReadyPlayers.length === 2 && game.players.every(id => newReadyPlayers.includes(id));
+
+    if (bothReady) {
+      await updateGame({
+        readyPlayers: newReadyPlayers,
+        status: "Both players are ready! Starting in 3 seconds..."
+      });
+    } else {
+      await updateGame({
+        readyPlayers: newReadyPlayers,
+        status: "One player is ready. Waiting for the other to ready up..."
+      });
+    }
   };
 
   const submitWord = async (word) => {
@@ -287,6 +477,12 @@ export default function Game({ gameId, user, onLeave }) {
     const dictionaryValid = hasLetters && isDictionaryWord(word);
     const valid = hasLetters && dictionaryValid;
     const direction = pushDirection(game, me);
+    const wordUpper = word.trim().toUpperCase();
+    const invalidReason = wordUpper.length < MIN_LENGTH
+      ? "too few letters"
+      : !hasLetters
+      ? "used letters not on the board"
+      : "word not found in dictionary";
 
     if (!hasLetters) {
       setRoundMessage("That word cannot be formed from the available letter cubes.");
@@ -303,15 +499,16 @@ export default function Game({ gameId, user, onLeave }) {
       if (!valid) {
         const position = clamp(game.position - direction, -MAX_CARRIAGE, MAX_CARRIAGE);
         const scored = position === (me === game.players[0] ? -MAX_CARRIAGE : MAX_CARRIAGE);
-        const newDice = rollDice();
+        const newDice = scored ? rollAllDice() : rollFaces(game.diceAssignments);
         const update = {
           position: scored ? 0 : position,
           dice: newDice.dice,
+          diceAssignments: newDice.diceAssignments ?? game.diceAssignments,
           roundOpen: true,
           challenge: null,
           status: scored
-            ? `Incorrect during challenge. Challenger scores a point.`
-            : `Incorrect during challenge. Challenger pushes the carriage one row ahead.`
+            ? `${formatPlayer(me)} entered an invalid word: **${wordUpper}** (${invalidReason})\n${formatPlayer(challengeChallenger)} scores a point!`
+            : `${formatPlayer(me)} entered an invalid word: **${wordUpper}** (${invalidReason})`
         };
 
         if (scored) {
@@ -319,24 +516,30 @@ export default function Game({ gameId, user, onLeave }) {
             ...game.scores,
             [challengeChallenger]: (game.scores[challengeChallenger] || 0) + 1
           };
+          if ((game.scores[challengeChallenger] || 0) + 1 >= targetScore) update.phase = "finished";
         }
 
+        const wid1 = `${Date.now()}-${wordUpper}`;
+        update.playedWords = [...(game.playedWords || []), { id: wid1, word: wordUpper, email: formatPlayer(me), valid: false }];
         await updateGame(update);
+        setPlayedWords(prev => prev.some(w => w.id === wid1) ? prev : [...prev, { id: wid1, word: wordUpper, email: formatPlayer(me), valid: false }]);
+        channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid1, word: wordUpper, email: formatPlayer(me), valid: false } });
         setRoundMessage("");
         return;
       }
 
       const position = clamp(game.position + direction, -MAX_CARRIAGE, MAX_CARRIAGE);
       const scored = position === (me === game.players[0] ? MAX_CARRIAGE : -MAX_CARRIAGE);
-      const newDice = rollDice();
+      const newDice = scored ? rollAllDice() : rollFaces(game.diceAssignments);
       const update = {
         position: scored ? 0 : position,
         dice: newDice.dice,
+        diceAssignments: newDice.diceAssignments ?? game.diceAssignments,
         roundOpen: true,
         challenge: null,
         status: scored
-          ? `Challenge won! ${formatPlayer(me)} spells a valid word and scores the point.`
-          : `Challenge won. ${formatPlayer(me)} pushes the carriage one row ahead.`
+          ? `${formatPlayer(me)} entered a valid word: **${wordUpper}**\n${formatPlayer(me)} scores a point!`
+          : `${formatPlayer(me)} entered a valid word: **${wordUpper}**`
       };
 
       if (scored) {
@@ -344,9 +547,14 @@ export default function Game({ gameId, user, onLeave }) {
           ...game.scores,
           [me]: myScore + 1
         };
+        if (myScore + 1 >= targetScore) update.phase = "finished";
       }
 
+      const wid2 = `${Date.now()}-${wordUpper}`;
+      update.playedWords = [...(game.playedWords || []), { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true }];
       await updateGame(update);
+      setPlayedWords(prev => prev.some(w => w.id === wid2) ? prev : [...prev, { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true }]);
+      channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true } });
       setRoundMessage("");
       return;
     }
@@ -354,14 +562,15 @@ export default function Game({ gameId, user, onLeave }) {
     if (valid) {
       const position = clamp(game.position + direction, -MAX_CARRIAGE, MAX_CARRIAGE);
       const scored = position === (me === game.players[0] ? MAX_CARRIAGE : -MAX_CARRIAGE);
-      const newDice = rollDice();
+      const newDice = scored ? rollAllDice() : rollFaces(game.diceAssignments);
       const update = {
         position: scored ? 0 : position,
         dice: newDice.dice,
+        diceAssignments: newDice.diceAssignments ?? game.diceAssignments,
         roundOpen: true,
         status: scored
-          ? `${formatPlayer(me)} spelled a valid word and scored a point! The carriage returns to the center.`
-          : `${formatPlayer(me)} spelled a valid word. The carriage moves one row toward the opponent.`
+          ? `${formatPlayer(me)} entered a valid word: **${wordUpper}**\n${formatPlayer(me)} scores a point!`
+          : `${formatPlayer(me)} entered a valid word: **${wordUpper}**`
       };
 
       if (scored) {
@@ -369,23 +578,29 @@ export default function Game({ gameId, user, onLeave }) {
           ...game.scores,
           [me]: myScore + 1
         };
+        if (myScore + 1 >= targetScore) update.phase = "finished";
       }
 
+      const wid3 = `${Date.now()}-${wordUpper}`;
+      update.playedWords = [...(game.playedWords || []), { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true }];
       await updateGame(update);
+      setPlayedWords(prev => prev.some(w => w.id === wid3) ? prev : [...prev, { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true }]);
+      channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true } });
       setRoundMessage("");
       return;
     }
 
     const position = clamp(game.position - direction, -MAX_CARRIAGE, MAX_CARRIAGE);
     const scored = position === (me === game.players[0] ? -MAX_CARRIAGE : MAX_CARRIAGE);
-    const newDice = rollDice();
+    const newDice = scored ? rollAllDice() : rollFaces(game.diceAssignments);
     const update = {
       position: scored ? 0 : position,
       dice: newDice.dice,
+      diceAssignments: newDice.diceAssignments ?? game.diceAssignments,
       roundOpen: true,
       status: scored
-        ? `Incorrect word. Opponent pushes the carriage against the wall and scores a point.`
-        : `Incorrect word. Opponent pushes the carriage one row ahead.`
+        ? `${formatPlayer(me)} entered an invalid word: **${wordUpper}** (${invalidReason})\n${formatPlayer(opponent)} scores a point!`
+        : `${formatPlayer(me)} entered an invalid word: **${wordUpper}** (${invalidReason})`
     };
 
     if (scored) {
@@ -393,9 +608,14 @@ export default function Game({ gameId, user, onLeave }) {
         ...game.scores,
         [opponent]: (game.scores[opponent] || 0) + 1
       };
+      if ((game.scores[opponent] || 0) + 1 >= targetScore) update.phase = "finished";
     }
 
+    const wid4 = `${Date.now()}-${wordUpper}`;
+    update.playedWords = [...(game.playedWords || []), { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false }];
     await updateGame(update);
+    setPlayedWords(prev => prev.some(w => w.id === wid4) ? prev : [...prev, { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false }]);
+    channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false } });
     setRoundMessage("");
   };
 
@@ -408,72 +628,96 @@ export default function Game({ gameId, user, onLeave }) {
         challenger: me,
         expiresAt: Date.now() + 10000
       },
-      status: `${formatPlayer(me)} has challenged the opponent. The opponent has 10 seconds to spell a word.`
+      status: `${formatPlayer(me)} started a challenge: 10s`
     });
   };
 
-  const leaveGame = async () => {
-    const remainingPlayers = (game.players || []).filter(id => id !== me);
-    const remainingScores = Object.fromEntries(
-      Object.entries(game.scores || {}).filter(([key]) => key !== me)
-    );
+  const pauseGame = async () => {
+    await updateGame({
+      phase: "paused",
+      readyPlayers: [],
+      roundOpen: false,
+      challenge: null,
+      status: "Game paused. Both players need to ready up to resume."
+    });
+    setReadyCountdown(null);
+  };
 
-    if (remainingPlayers.length === 0) {
+  const leaveGame = async () => {
+    const isAlone = (game.players || []).length <= 1;
+
+    // Remove ourselves from presence immediately
+    const presentNow = (game.presentPlayers || []).filter(id => id !== me);
+
+    if (isAlone) {
       await supabase.from("games").delete().eq("id", gameId);
-    } else {
-      await supabase.from("games").update({
-        players: remainingPlayers,
-        scores: remainingScores,
-        phase: "waiting",
+    } else if (game.phase !== "finished") {
+      await updateGame({
+        phase: "paused",
+        readyPlayers: [],
+        presentPlayers: presentNow,
         roundOpen: false,
         challenge: null,
-        status: `${formatPlayer(me)} has left the game. Waiting for a new opponent.`
-      }).eq("id", gameId);
+        status: "A player stepped away. Both players need to ready up to resume."
+      });
     }
 
     onLeave?.();
   };
 
   return (
-    <div className="page-shell">
-      <div className="panel game-panel">
-        <div className="game-header">
-          <div>
-            <h1>Razzle</h1>
-          </div>
-            {game.phase === "ready" ? (
-                <button className="button secondary start-button" onClick={startGame}>
-                  Start Game
-                </button>
-            ) :
-            <button className="button secondary leave-button" onClick={leaveGame}>
-            Leave Game
-            </button>
-            }
-        </div>
+    <div className="game-shell">
 
-        <div className="status-box">
-          <p>{game.status}</p>
-          {roundMessage && <p className="notice">{roundMessage}</p>}
-          {challengeActive && <p className="notice">Challenge countdown: {countdown}s</p>}
+      {/* ── Left sidebar: brand + status ─────────────── */}
+      <div className="game-sidebar-left">
+        <div className="game-brand-block">
+          <div className="brand">Razzle</div>
+          <div className="game-username">{playerProfiles[user?.id]}</div>
         </div>
+        <div className="game-status-sidebar">
+          <div className="status-box">
+            {(game.status || "").split('\n').map((line, i, arr) => {
+              const displayLine = (challengeActive && i === arr.length - 1)
+                ? line.replace(/\d+s$/, `**${countdown}s**`)
+                : line;
+              return <p key={i}>{renderStatus(displayLine)}</p>;
+            })}
+            {/**roundMessage && <p className="notice">{roundMessage}</p>*/}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Center: game panel ────────────────────────── */}
+      <div className="game-panel">
+
+        {/* Pre-game overlay */}
+        {game.phase !== "playing" && !winner && (() => {
+          const presentPlayers = [...new Set([...(game.presentPlayers || []), me])];
+          const bothPresent = game.players.length >= 2 && game.players.every(id => presentPlayers.includes(id));
+          const iReady = (game.readyPlayers || []).includes(me);
+
+          return (
+            <div className="game-overlay">
+              <div className="game-overlay-card">
+                {!bothPresent ? (
+                  <p className="overlay-title">Waiting for opponent&hellip;</p>
+                ) : readyCountdown !== null ? (
+                  <p className="overlay-title">Game starting in {readyCountdown}&hellip;</p>
+                ) : iReady ? (
+                  <p className="overlay-title">Waiting for opponent to be ready&hellip;</p>
+                ) : (
+                  <>
+                    <p className="overlay-title">{game.phase === "paused" ? "Game paused" : "Both players are here!"}</p>
+                    <button className="button primary" onClick={readyUp}>Ready Up</button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         <div className="board-layout">
           <div className="left-sidebar">
-            <div className="score-column right-score">
-              <div className="score-label">Opponent</div>
-              {scoreRows.slice().reverse().map((rowValue, idx) => {
-                const actualRow = scoreRows.length - 1 - idx;
-                const filled = opponentScore >= scoreRows[actualRow];
-                const slider = actualRow === opponentSliderIndex;
-                return (
-                  <div key={rowValue} className={`score-row ${filled ? "filled" : ""} ${slider ? "slider" : ""}`}>
-                    {rowValue}
-                  </div>
-                );
-              })}
-            </div>
-
             <div className="challenge-column">
               <button className="button challenge-button circular" onClick={handleChallengeClick} disabled={!isPlaying || challengeActive}>
                 {challengeGifPlaying ? (
@@ -489,22 +733,39 @@ export default function Game({ gameId, user, onLeave }) {
               </button>
             </div>
 
-            <div className="score-column left-score">
-              {scoreRows.map((rowValue, idx) => {
-                const filled = myScore >= rowValue;
-                const slider = idx === mySliderIndex;
-                return (
-                  <div key={rowValue} className={`score-row ${filled ? "filled" : ""} ${slider ? "slider" : ""}`}>
-                    {rowValue}
-                  </div>
-                );
-              })}
-              <div className="score-label">You</div>
+            <div className="scores-pair">
+              <div className="score-column right-score">
+                <div className="score-label">Opp</div>
+                {scoreRows.slice().reverse().map((rowValue, idx) => {
+                  const actualRow = scoreRows.length - 1 - idx;
+                  const filled = opponentScore >= scoreRows[actualRow];
+                  const slider = actualRow === opponentSliderIndex;
+                  return (
+                    <div key={rowValue} className={`score-row ${filled ? "filled" : ""} ${slider ? "slider" : ""}`}>
+                      {rowValue}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="score-column left-score">
+                <div className="score-label">You</div>
+                {scoreRows.map((rowValue, idx) => {
+                  const filled = myScore >= rowValue;
+                  const slider = idx === mySliderIndex;
+                  return (
+                    <div key={rowValue} className={`score-row ${filled ? "filled" : ""} ${slider ? "slider" : ""}`}>
+                      {rowValue}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
           <div className="board-column">
-            <div className="board-grid">
+            <div className="board-grid" ref={gridRef}>
+              <div className="carriage-bar" ref={carriageRef} />
               {Array.from({ length: 7 }).map((_, row) => (
                 <div key={row} className={`grid-row ${activeRowIndex === row ? "active" : ""}`}>
                   {Array.from({ length: 6 }).map((__, col) => (
@@ -529,6 +790,31 @@ export default function Game({ gameId, user, onLeave }) {
           <WordInput onSubmit={submitWord} disabled={challengeInputDisabled} />
         </div>
       </div>
+
+      {/* ── Right sidebar: actions ────────────────────── */}
+      <div className="game-sidebar-right">
+        <button className="button secondary" onClick={leaveGame}>Leave Game</button>
+        <div className="played-words-list">
+          <div className="played-words-title">Words Played</div>
+          <div className="played-words-scroll">
+            {playedWords.length === 0
+              ? <p className="played-words-empty">None yet</p>
+              : <ul>
+                  {playedWords.slice().reverse().map(entry => (
+                    <li key={entry.id} className={`word-entry ${entry.valid ? "valid" : "invalid"}`}>
+                      <strong>{entry.word}</strong>
+                      <span className="word-entry-email">{entry.email}</span>
+                    </li>
+                  ))}
+                </ul>
+            }
+          </div>
+        </div>
+        {isPlaying && (
+          <button className="button secondary pause-game-button" onClick={pauseGame}>Pause Game</button>
+        )}
+      </div>
+
     </div>
   );
 }

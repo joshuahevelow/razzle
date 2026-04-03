@@ -5,12 +5,26 @@ export default function AuthPage() {
   const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("");
   const [error, setError] = useState("");
   const [signedUp, setSignedUp] = useState(false);
 
   const handleSignUp = async () => {
     setError("");
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const trimmed = username.trim();
+    if (!trimmed) { setError("Choose a username."); return; }
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(trimmed)) {
+      setError("Username must be 3–20 characters: letters, numbers, and underscores only.");
+      return;
+    }
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { username: trimmed },
+        emailRedirectTo: window.location.origin
+      }
+    });
     if (error) {
       setError(error.message);
     } else if (data.user?.identities?.length === 0) {
@@ -31,6 +45,7 @@ export default function AuthPage() {
     setMode(newMode);
     setError("");
     setSignedUp(false);
+    setUsername("");
   };
 
   return (
@@ -61,6 +76,19 @@ export default function AuthPage() {
                 placeholder="you@example.com"
               />
             </label>
+
+            {mode === "signup" && (
+              <label>
+                Username
+                <input
+                  type="text"
+                  value={username}
+                  onChange={e => setUsername(e.target.value)}
+                  placeholder="e.g. coolplayer42"
+                  maxLength={20}
+                />
+              </label>
+            )}
 
             <label>
               Password
