@@ -1,7 +1,16 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function WordInput({ onSubmit, disabled }) {
   const [word, setWord] = useState("");
+  const inputRef = useRef(null);
+  const prevDisabledRef = useRef(disabled);
+
+  useEffect(() => {
+    if (prevDisabledRef.current && !disabled) {
+      inputRef.current?.focus();
+    }
+    prevDisabledRef.current = disabled;
+  }, [disabled]);
 
   const submit = () => {
     if (disabled || !word.trim()) return;
@@ -12,6 +21,7 @@ export default function WordInput({ onSubmit, disabled }) {
   return (
     <div className="word-form">
       <input
+        ref={inputRef}
         className="word-input"
         placeholder="Enter word"
         value={word}

@@ -218,13 +218,14 @@ export default function Game({ gameId, user, onLeave }) {
       const t = setTimeout(() => setReadyCountdown(c => c - 1), 1000);
       return () => clearTimeout(t);
     }
-    // countdown reached 0 — only players[0] fires the actual game start
+    // countdown reached 0 — only players[0] fires the actual game start/resume
     if (game?.players?.[0] !== me) return;
+    const isResume = (game.dice?.length > 0);
     const newDice = rollAllDice();
     updateGame({
       readyPlayers: game.readyPlayers,
       phase: "playing",
-      position: 0,
+      ...(isResume ? {} : { position: 0 }),
       dice: newDice.dice,
       diceAssignments: newDice.diceAssignments,
       roundOpen: true,
@@ -235,12 +236,14 @@ export default function Game({ gameId, user, onLeave }) {
   }, [readyCountdown]);
 
   useEffect(() => {
-
+    if (!game?.challenge?.active) {
+      setCountdown(0);
+      return;
+    }
+    const expiresAt = game.challenge.expiresAt;
     const interval = setInterval(() => {
-      const left = Math.max(0, Math.ceil((game.challenge.expiresAt - Date.now()) / 1000));
-      setCountdown(left);
+      setCountdown(Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)));
     }, 250);
-
     return () => clearInterval(interval);
   }, [game?.challenge?.active, game?.challenge?.expiresAt]);
 
@@ -363,7 +366,7 @@ export default function Game({ gameId, user, onLeave }) {
 
     const timeout = setTimeout(resolveChallenge, remaining);
     return () => clearTimeout(timeout);
-  }, [game, game?.challenge, gameId]);
+  }, [game?.challenge?.active, game?.challenge?.expiresAt, gameId]);
 
   if (!game) return <div className="page-shell"><div className="panel">Loading game...</div></div>;
 

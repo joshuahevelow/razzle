@@ -18,7 +18,7 @@ export default function Lobby({ setGameId, user, profile }) {
     if (!me) return;
 
     const loadGames = async () => {
-      const { data, error } = await supabase.from("games").select("*");
+      const { data, error } = await supabase.from("games").select("*").neq("phase", "cancelled");
       if (error) { console.error(error); return; }
       setGames(data || []);
     };
@@ -128,7 +128,7 @@ export default function Lobby({ setGameId, user, profile }) {
 
   const cancelInvite = async (game) => {
     setGames((prev) => prev.filter((g) => g.id !== game.id));
-    await supabase.from("games").delete().eq("id", game.id);
+    await supabase.from("games").update({ phase: "cancelled" }).eq("id", game.id);
     lobbyChannelRef.current?.send({ type: "broadcast", event: "lobby-delete", payload: { gameId: game.id } });
   };
 
@@ -157,7 +157,7 @@ export default function Lobby({ setGameId, user, profile }) {
   );
 
   const activeGames = games.filter(
-    (g) => g.players?.includes(me) && g.phase !== "invited" && g.phase !== "finished"
+    (g) => g.players?.includes(me) && g.phase !== "invited" && g.phase !== "finished" && g.phase !== "cancelled"
   );
 
   return (
