@@ -342,6 +342,17 @@ export default function Game({ gameId, user, onLeave }) {
   };
 
   useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.code !== "Space") return;
+      e.preventDefault();
+      if (game?.phase !== "playing" || game?.challenge?.active) return;
+      handleChallengeClick();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [game?.phase, game?.challenge?.active]);
+
+  useEffect(() => {
     if (!game?.challenge?.active) return;
     // Only the challenger resolves the timeout — prevents both clients from
     // independently rolling dice and writing conflicting letters to the DB.
