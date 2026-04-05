@@ -342,17 +342,6 @@ export default function Game({ gameId, user, onLeave }) {
   };
 
   useEffect(() => {
-    const onKeyDown = (e) => {
-      if (e.code !== "Space") return;
-      e.preventDefault();
-      if (game?.phase !== "playing" || game?.challenge?.active) return;
-      handleChallengeClick();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [game?.phase, game?.challenge?.active]);
-
-  useEffect(() => {
     if (!game?.challenge?.active) return;
     // Only the challenger resolves the timeout — prevents both clients from
     // independently rolling dice and writing conflicting letters to the DB.
@@ -433,6 +422,10 @@ export default function Game({ gameId, user, onLeave }) {
     const optimisticGame = game ? { ...game, ...update } : null;
     setGame(optimisticGame);
 
+    // Capture the position BEFORE the optimistic update for the concurrency lock below.
+    // This is safe because game (closure value) hasn't changed — setGame is async.
+    const expectedPosition = 'position' in update ? game.position : undefined;
+
     // Broadcast directly over WebSocket to all other clients (<50ms vs postgres_changes which can be 500ms+)
     // Always include ourselves in presentPlayers of the broadcast so the recipient knows we're here,
     // unless we're explicitly passing presentPlayers in the update (e.g. leaveGame removes us).
@@ -449,7 +442,14 @@ export default function Game({ gameId, user, onLeave }) {
     // Strip it from the Supabase write to avoid a column-not-found error that would silently
     // prevent scores and phase updates from being persisted.
     const { diceAssignments: _da, ...dbUpdate } = update;
-    const { data, error } = await supabase.from("games").update(dbUpdate).eq("id", gameId).select().single();
+
+    // When the update moves the carriage, add an optimistic-lock condition so that
+    // two simultaneous word submissions don't silently overwrite each other.
+    // .maybeSingle() returns { data: null, error: null } when 0 rows matched (lock lost).
+    let query = supabase.from("games").update(dbUpdate).eq("id", gameId);
+    if (expectedPosition !== undefined) query = query.eq("position", expectedPosition);
+    const { data, error } = await query.select().maybeSingle();
+
     if (error) {
       console.error("Failed to update game:", error);
       setRoundMessage(`Could not update the game: ${error.message}`);
@@ -464,10 +464,18 @@ export default function Game({ gameId, user, onLeave }) {
         : data);
       return data;
     }
-    // .select() returned null (e.g. RLS filtered the row) — refetch to sync canonical state
+
+    // 0 rows matched — either optimistic lock lost (concurrent submission) or RLS filtered.
+    // Re-fetch canonical state and broadcast the correction to undo our false optimistic update.
     const { data: refetched } = await supabase.from("games").select("*").eq("id", gameId).single();
-    if (refetched) setGame(refetched);
-    return refetched ?? null;
+    if (refetched) {
+      setGame(refetched);
+      channelRef.current?.send({ type: "broadcast", event: "game-update", payload: { game: refetched } });
+    }
+    if (expectedPosition !== undefined) {
+      setRoundMessage("Your opponent submitted at the same time — wait for the new letters, then try again.");
+    }
+    return null;
   };
 
   const readyUp = async () => {
