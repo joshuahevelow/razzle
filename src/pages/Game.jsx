@@ -99,6 +99,7 @@ export default function Game({ gameId, user, onLeave }) {
   const [playedWords, setPlayedWords] = useState([]);
   const [readyCountdown, setReadyCountdown] = useState(null);
   const [playerProfiles, setPlayerProfiles] = useState({});
+  const [flashWord, setFlashWord] = useState(null);
   const [isDiceShuffling, setIsDiceShuffling] = useState(false);
   const diceResetKeyRef = useRef(0);
   const previousPositionRef = useRef(0);
@@ -148,6 +149,7 @@ export default function Game({ gameId, user, onLeave }) {
       })
       .on("broadcast", { event: "word-played" }, ({ payload }) => {
         if (!payload?.word) return;
+        setFlashWord({ word: payload.word, valid: payload.valid, key: Date.now() });
         setPlayedWords(prev => {
           if (prev.some(w => w.id === payload.id)) return prev;
           return [...prev, payload];
@@ -591,7 +593,7 @@ export default function Game({ gameId, user, onLeave }) {
 
       const wid2 = `${Date.now()}-${wordUpper}`;
       update.playedWords = [...(game.playedWords || []), { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true }];
-      await updateGame(update);
+      await updateGame(update);      setFlashWord({ word: wordUpper, valid: false, key: Date.now() });      setFlashWord({ word: wordUpper, valid: true, key: Date.now() });
       setPlayedWords(prev => prev.some(w => w.id === wid2) ? prev : [...prev, { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true }]);
       channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid2, word: wordUpper, email: formatPlayer(me), valid: true } });
       setRoundMessage("");
@@ -623,6 +625,7 @@ export default function Game({ gameId, user, onLeave }) {
       const wid3 = `${Date.now()}-${wordUpper}`;
       update.playedWords = [...(game.playedWords || []), { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true }];
       await updateGame(update);
+      setFlashWord({ word: wordUpper, valid: true, key: Date.now() });
       setPlayedWords(prev => prev.some(w => w.id === wid3) ? prev : [...prev, { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true }]);
       channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid3, word: wordUpper, email: formatPlayer(me), valid: true } });
       setRoundMessage("");
@@ -653,6 +656,7 @@ export default function Game({ gameId, user, onLeave }) {
     const wid4 = `${Date.now()}-${wordUpper}`;
     update.playedWords = [...(game.playedWords || []), { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false }];
     await updateGame(update);
+    setFlashWord({ word: wordUpper, valid: false, key: Date.now() });
     setPlayedWords(prev => prev.some(w => w.id === wid4) ? prev : [...prev, { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false }]);
     channelRef.current?.send({ type: "broadcast", event: "word-played", payload: { id: wid4, word: wordUpper, email: formatPlayer(me), valid: false } });
     setRoundMessage("");
@@ -710,6 +714,16 @@ export default function Game({ gameId, user, onLeave }) {
 
   return (
     <div className="game-shell">
+
+      {flashWord && (
+        <div
+          key={flashWord.key}
+          className={`word-flash-overlay${flashWord.valid ? "" : " invalid"}`}
+          onAnimationEnd={() => setFlashWord(null)}
+        >
+          {flashWord.word}
+        </div>
+      )}
 
       {/* ── Left sidebar: brand + status ─────────────── */}
       <div className="game-sidebar-left">
