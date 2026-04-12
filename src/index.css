@@ -639,7 +639,7 @@ button:disabled {
   background: #fff8f0;
   display: grid;
   place-items: center;
-  font-size: 0.9rem;
+  font-size: 2rem;
   font-weight: 700;
   color: var(--maroon-dark);
   position: relative;
