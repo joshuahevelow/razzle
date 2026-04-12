@@ -32,7 +32,7 @@ export default function WordInput({ onSubmit, disabled, resetKey }) {
         value={word}
         onChange={e => setWord(e.target.value)}
         onKeyDown={e => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             submit();
           }
